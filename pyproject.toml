@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llaminal"
+version = "0.1.0"
+description = "An agentic, scrolling CLI that talks to a local Llama model"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx",
+    "rich",
+    "prompt-toolkit",
+    "click",
+]
+
+[project.scripts]
+llaminal = "llaminal.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llaminal"]
