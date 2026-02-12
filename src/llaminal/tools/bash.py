@@ -1,38 +1,57 @@
 """Bash tool — run shell commands with user confirmation."""
 
 import asyncio
+import os
 
 from llaminal.tools.registry import Tool
+
+DEFAULT_TIMEOUT = 30
 
 
 async def _run_bash(command: str) -> str:
     """Execute a shell command after user confirmation."""
+    cwd = os.getcwd()
     print(f"\n  Command: {command}")
+    print(f"  Working directory: {cwd}")
     answer = input("  Execute? [y/N] ").strip().lower()
     if answer != "y":
         return "Command execution cancelled by user."
 
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=DEFAULT_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return (
+            f"stdout: \n"
+            f"stderr: \n"
+            f"exit_code: -1\n"
+            f"timed_out: true\n"
+            f"Error: command timed out after {DEFAULT_TIMEOUT}s"
+        )
 
-    output = ""
-    if stdout:
-        output += stdout.decode(errors="replace")
-    if stderr:
-        output += ("\n--- stderr ---\n" if output else "") + stderr.decode(errors="replace")
-
-    if not output:
-        output = f"(process exited with code {proc.returncode})"
+    stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else ""
+    stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
 
     # Cap output length
-    if len(output) > 10_000:
-        output = output[:10_000] + "\n... (truncated)"
+    if len(stdout) > 10_000:
+        stdout = stdout[:10_000] + "\n... (truncated)"
+    if len(stderr) > 10_000:
+        stderr = stderr[:10_000] + "\n... (truncated)"
 
-    return output
+    return (
+        f"stdout: {stdout}\n"
+        f"stderr: {stderr}\n"
+        f"exit_code: {proc.returncode}\n"
+        f"timed_out: false"
+    )
 
 
 bash_tool = Tool(

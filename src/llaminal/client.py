@@ -19,10 +19,24 @@ class Delta:
 class LlaminalClient:
     """Wraps httpx.AsyncClient to talk to an OpenAI-compatible chat endpoint."""
 
-    def __init__(self, base_url: str = "http://localhost:8080", model: str = "local-model"):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8080",
+        model: str = "local-model",
+        api_key: str | None = None,
+        temperature: float | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=120.0)
+        self.temperature = temperature
+
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url, timeout=120.0, headers=headers
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -38,6 +52,8 @@ class LlaminalClient:
         }
         if tools:
             payload["tools"] = tools
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
 
         async with self._client.stream(
             "POST", "/v1/chat/completions", json=payload
@@ -50,8 +66,16 @@ class LlaminalClient:
                 if data == "[DONE]":
                     return
 
-                chunk = json.loads(data)
-                choice = chunk["choices"][0]
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    # Skip malformed chunks from the model
+                    continue
+
+                choices = chunk.get("choices")
+                if not choices:
+                    continue
+                choice = choices[0]
                 delta = choice.get("delta", {})
 
                 yield Delta(

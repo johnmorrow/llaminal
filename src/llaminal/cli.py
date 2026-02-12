@@ -29,9 +29,16 @@ def build_registry() -> ToolRegistry:
     return registry
 
 
-async def _main_loop(port: int, model: str, system_prompt: str | None) -> None:
-    base_url = f"http://localhost:{port}"
-    client = LlaminalClient(base_url=base_url, model=model)
+async def _main_loop(
+    base_url: str,
+    model: str,
+    api_key: str | None,
+    temperature: float | None,
+    system_prompt: str | None,
+) -> None:
+    client = LlaminalClient(
+        base_url=base_url, model=model, api_key=api_key, temperature=temperature
+    )
     session = Session(system_prompt=system_prompt)
     registry = build_registry()
 
@@ -74,12 +81,26 @@ async def _main_loop(port: int, model: str, system_prompt: str | None) -> None:
 
 
 @click.command()
-@click.option("--port", default=8080, help="Port of the OpenAI-compatible server.")
+@click.option("--port", default=8080, help="Port of the local server (shorthand for --base-url http://localhost:<port>).")
+@click.option("--base-url", default=None, help="Full base URL of the OpenAI-compatible server.")
 @click.option("--model", default="local-model", help="Model name to send in requests.")
+@click.option("--api-key", default=None, envvar="LLAMINAL_API_KEY", help="API key for authentication (or set LLAMINAL_API_KEY).")
+@click.option("--temperature", default=None, type=float, help="Sampling temperature for the model.")
 @click.option("--system-prompt", default=None, help="Override the default system prompt.")
-def main(port: int, model: str, system_prompt: str | None) -> None:
+def main(
+    port: int,
+    base_url: str | None,
+    model: str,
+    api_key: str | None,
+    temperature: float | None,
+    system_prompt: str | None,
+) -> None:
     """Llaminal — an agentic CLI for local LLMs."""
-    asyncio.run(_main_loop(port, model, system_prompt))
+    # --base-url wins over --port
+    if base_url is None:
+        base_url = f"http://localhost:{port}"
+
+    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt))
 
 
 if __name__ == "__main__":

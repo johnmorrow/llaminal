@@ -2,6 +2,8 @@
 
 import json
 
+import httpx
+
 from llaminal.client import LlaminalClient
 from llaminal.render import render_error, render_tool_call, render_tool_result
 from llaminal.session import Session
@@ -46,7 +48,30 @@ async def run_agent_loop(
                         if "arguments" in fn:
                             tc["function"]["arguments"] += fn["arguments"]
 
+        except KeyboardInterrupt:
+            # Ctrl+C mid-stream: save what we have, don't corrupt session
+            full_content = "".join(content_parts)
+            if full_content:
+                print()
+                session.add_assistant(full_content)
+            raise
+
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            # Network failures: surface error, keep session intact for retry
+            print()
+            render_error(f"Connection error: {e}")
+            # Remove the last user message so the user can retry
+            if session.messages and session.messages[-1]["role"] == "user":
+                session.messages.pop()
+            return
+
+        except httpx.HTTPStatusError as e:
+            print()
+            render_error(f"Server returned {e.response.status_code}: {e.response.text[:200]}")
+            return
+
         except Exception as e:
+            print()
             render_error(str(e))
             return
 
