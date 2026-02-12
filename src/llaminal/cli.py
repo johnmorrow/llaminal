@@ -43,12 +43,20 @@ async def _main_loop(
     registry = build_registry()
 
     # Welcome banner
-    title = Text.assemble(
-        ("Llaminal", "bold magenta"),
-        (" v0.1.0", "dim"),
-    )
-    console.print(Panel(title, subtitle=f"connected to {base_url}", border_style="magenta"))
-    console.print("[dim]Type a message to chat. Ctrl+C to cancel, Ctrl+D to exit.[/dim]\n")
+    brown = "rgb(160,100,50)"
+    banner = Text()
+    banner.append("  @@@@@", style=brown)
+    banner.append("     Llaminal", style="bold magenta")
+    banner.append(" v0.1.0\n", style="dim")
+    banner.append(" @(", style=brown)
+    banner.append("o o", style="bold black")
+    banner.append(")@", style=brown)
+    banner.append(f"    {base_url}\n", style="dim")
+    banner.append("  (   )~", style=brown)
+    banner.append("\n")
+    banner.append("   ||||", style=brown)
+    banner.append("      Type a message to chat. Ctrl+C to cancel, Ctrl+D to exit.\n", style="dim italic")
+    console.print(Panel(banner, border_style="magenta", padding=(0, 1)))
 
     prompt_session: PromptSession = PromptSession(history=InMemoryHistory())
 
