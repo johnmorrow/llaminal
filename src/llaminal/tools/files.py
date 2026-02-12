@@ -9,7 +9,7 @@ from llaminal.tools.registry import Tool
 async def _read_file(path: str) -> str:
     """Read and return the contents of a file."""
     try:
-        return Path(path).read_text()
+        return Path(path).expanduser().read_text()
     except Exception as e:
         return f"Error reading {path}: {e}"
 
@@ -22,7 +22,7 @@ async def _write_file(path: str, content: str) -> str:
         return "Write cancelled by user."
 
     try:
-        p = Path(path)
+        p = Path(path).expanduser()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
         return f"Wrote {len(content)} chars to {path}"
@@ -33,7 +33,8 @@ async def _write_file(path: str, content: str) -> str:
 async def _list_files(pattern: str) -> str:
     """List files matching a glob pattern."""
     try:
-        matches = sorted(globmod.glob(pattern, recursive=True))
+        expanded = str(Path(pattern).expanduser())
+        matches = sorted(globmod.glob(expanded, recursive=True))
         if not matches:
             return f"No files matching '{pattern}'"
         return "\n".join(matches)
