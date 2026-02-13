@@ -1,17 +1,13 @@
-"""Entry point — input loop, Rich rendering, click CLI."""
+"""Entry point — shell wrapper launch, click CLI, config resolution."""
 
 import asyncio
-import time
+import sys
 from pathlib import Path
 
 import click
-from prompt_toolkit import PromptSession
-from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 from rich.table import Table
 
-from llaminal.agent import run_agent_loop
-from llaminal.banners import print_banner
 from llaminal.client import LlaminalClient
 from llaminal.config import DEFAULTS, load_config, resolve
 from llaminal.discover import discover_servers
@@ -22,7 +18,6 @@ from llaminal.themes import THEME_NAMES, THEMES, set_theme
 from llaminal.tools.bash import bash_tool
 from llaminal.tools.files import list_files_tool, read_file_tool, write_file_tool
 from llaminal.tools.registry import ToolRegistry
-
 
 console = Console()
 
@@ -36,20 +31,34 @@ def build_registry() -> ToolRegistry:
     return registry
 
 
-async def _main_loop(
-    base_url: str,
+async def _run_shell(
+    base_url: str | None,
     model: str,
     api_key: str | None,
     temperature: float | None,
     system_prompt: str | None,
     resume_id: str | None,
     show_stats: bool = False,
-    sound: bool = False,
-    quiet: bool = False,
+    shell: str | None = None,
+    context_lines: int = 50,
 ) -> None:
-    client = LlaminalClient(
-        base_url=base_url, model=model, api_key=api_key, temperature=temperature
-    )
+    from llaminal.ai_mode import AIMode
+    from llaminal.shell import ShellWrapper
+
+    # Optional pyte scrollback
+    try:
+        import pyte
+        has_pyte = True
+    except ImportError:
+        has_pyte = False
+
+    # Build AI components
+    client = None
+    if base_url:
+        client = LlaminalClient(
+            base_url=base_url, model=model, api_key=api_key, temperature=temperature
+        )
+
     storage = Storage()
     registry = build_registry()
 
@@ -58,62 +67,82 @@ async def _main_loop(
         messages = storage.load_session(resume_id)
         if not messages:
             console.print(f"[bold red]Error:[/bold red] Session '{resume_id}' not found.")
-            await client.close()
+            if client:
+                await client.close()
             storage.close()
             return
         session = Session(system_prompt=system_prompt)
         session.messages = messages
         session_id = resume_id
-        save_index = len(messages)
-        console.print(f"[dim]Resumed session {session_id}[/dim]\n")
     else:
         session = Session(system_prompt=system_prompt)
         session_id = storage.create_session(model)
-        # Save the system prompt message
         storage.save_messages(session_id, session.messages, 0)
-        save_index = len(session.messages)
 
-    # Welcome banner
-    if not quiet:
-        print_banner(console, base_url)
+    # Create shell wrapper
+    wrapper = ShellWrapper(shell=shell)
 
-    prompt_session: PromptSession = PromptSession(history=InMemoryHistory())
+    # Set up pyte scrollback capture
+    pyte_screen = None
+    pyte_stream = None
+    if has_pyte:
+        import os
+        size = os.get_terminal_size()
+        pyte_screen = pyte.Screen(size.columns, size.lines)
+        pyte_screen.set_mode(pyte.modes.LNM)
+        pyte_stream = pyte.Stream(pyte_screen)
 
-    while True:
-        try:
-            user_input = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: prompt_session.prompt("you> ")
-            )
-        except EOFError:
-            console.print("\n[dim]Goodbye![/dim]")
-            break
-        except KeyboardInterrupt:
-            continue
+        def feed_pyte(data: bytes) -> None:
+            try:
+                pyte_stream.feed(data.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
 
-        user_input = user_input.strip()
-        if not user_input:
-            continue
+        wrapper.add_master_output_callback(feed_pyte)
 
-        session.add_user(user_input)
-        console.print()
+    def get_scrollback_context() -> str | None:
+        """Extract recent terminal content from pyte screen."""
+        if pyte_screen is None:
+            return None
+        lines = []
+        display = pyte_screen.display
+        for line in display:
+            stripped = line.rstrip()
+            lines.append(stripped)
+        # Trim trailing empty lines
+        while lines and not lines[-1]:
+            lines.pop()
+        # Take last N lines
+        recent = lines[-context_lines:] if len(lines) > context_lines else lines
+        text = "\n".join(recent).strip()
+        return text if text else None
 
-        t0 = time.monotonic()
-        try:
-            await run_agent_loop(client, session, registry, show_stats=show_stats)
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Generation cancelled.[/yellow]")
+    # Create AI mode handler
+    ai_handler = AIMode(
+        shell_wrapper=wrapper,
+        client=client,
+        session=session,
+        registry=registry,
+        storage=storage,
+        session_id=session_id,
+        show_stats=show_stats,
+        context_provider=get_scrollback_context,
+    )
 
-        if sound and (time.monotonic() - t0) > 3.0:
-            print("\a", end="", flush=True)
+    # Wire up callbacks — shell only fires toggle(True) on double-ESC entry;
+    # AIMode.exit() handles its own return to shell mode.
+    wrapper.set_ai_mode_toggle_callback(lambda entering: ai_handler.enter() if entering else None)
+    wrapper.set_ai_input_callback(ai_handler.handle_input)
 
-        # Persist new messages
-        storage.save_messages(session_id, session.messages, save_index)
-        save_index = len(session.messages)
-
-        console.print()
-
-    await client.close()
-    storage.close()
+    # Spawn and run
+    wrapper.spawn()
+    try:
+        await wrapper.run()
+    finally:
+        wrapper.cleanup()
+        if client:
+            await client.close()
+        storage.close()
 
 
 def _show_history() -> None:
@@ -153,9 +182,9 @@ def _show_history() -> None:
 @click.option("--history", "show_history", is_flag=True, help="Show recent conversation sessions.")
 @click.option("--stats", "show_stats", is_flag=True, help="Show token/sec and latency stats after each response.")
 @click.option("--mood", default=None, type=click.Choice(MOOD_NAMES, case_sensitive=False), help="Use a persona preset (e.g. pirate, poet, senior-engineer).")
-@click.option("--sound", is_flag=True, help="Play a terminal bell when a long response finishes.")
-@click.option("--quiet", "-q", is_flag=True, help="Suppress the startup banner.")
 @click.option("--theme", default=None, type=click.Choice(THEME_NAMES, case_sensitive=False), help="Color theme (default, light, solarized, dracula, catppuccin, llama).")
+@click.option("--shell", "shell_cmd", default=None, help="Shell to launch (default: $SHELL).")
+@click.option("--context-lines", default=None, type=int, help="Number of terminal lines to capture as AI context (default: 50).")
 def main(
     port: int | None,
     base_url: str | None,
@@ -168,11 +197,11 @@ def main(
     show_history: bool,
     show_stats: bool,
     mood: str | None,
-    sound: bool,
-    quiet: bool,
     theme: str | None,
+    shell_cmd: str | None,
+    context_lines: int | None,
 ) -> None:
-    """Llaminal — an agentic CLI for local LLMs."""
+    """Llaminal — your shell, with AI. Double-tap Escape to toggle AI mode."""
     if show_history:
         _show_history()
         return
@@ -186,15 +215,18 @@ def main(
         raise SystemExit(1)
     set_theme(theme_name)
 
-    # Resolve each setting: CLI flag > env var (handled by Click for api_key) > config > default
+    # Resolve settings
     model = resolve(model, cfg.get("model"), DEFAULTS["model"])
     api_key = resolve(api_key, cfg.get("api_key"), DEFAULTS["api_key"])
     temperature = resolve(temperature, cfg.get("temperature"), DEFAULTS["temperature"])
-    # Mood resolution: --system-prompt > --mood > config mood > config system_prompt > default
+    shell_cmd = resolve(shell_cmd, cfg.get("shell"), DEFAULTS["shell"])
+    context_lines = resolve(context_lines, cfg.get("context_lines"), DEFAULTS["context_lines"])
+
+    # Mood resolution
     if mood is None:
         mood = cfg.get("mood")
     if system_prompt is not None:
-        pass  # explicit --system-prompt wins
+        pass
     elif mood is not None:
         if mood not in MOODS:
             console.print(f"[bold red]Error:[/bold red] Unknown mood '{mood}'. Options: {', '.join(MOOD_NAMES)}")
@@ -203,7 +235,7 @@ def main(
     else:
         system_prompt = cfg.get("system_prompt")
 
-    # Base URL resolution: --base-url > --port > config base_url > config port > auto-detect
+    # Base URL resolution
     if base_url is None:
         if port is not None:
             base_url = f"http://localhost:{port}"
@@ -213,16 +245,11 @@ def main(
                 base_url = f"http://localhost:{cfg['port']}"
 
     if base_url is None:
-        # No explicit server configured — try auto-detection
+        # Try auto-detection (non-blocking)
         base_url = _auto_detect()
 
-    if base_url is None:
-        console.print("[bold red]Error:[/bold red] No LLM server found.")
-        console.print("[dim]Start a server and retry, or specify one explicitly:\n")
-        console.print("  llama-server -m model.gguf --port 8080")
-        console.print("  llaminal --base-url http://localhost:8080")
-        console.print("  llaminal --port 8080[/dim]")
-        raise SystemExit(1)
+    # No server is NOT fatal anymore — shell still works, AI mode shows a message
+    show_stats = show_stats or cfg.get("stats", False)
 
     # Resolve --resume last
     if resume_id == "last":
@@ -233,38 +260,33 @@ def main(
             console.print("[bold red]Error:[/bold red] No previous sessions to resume.")
             raise SystemExit(1)
 
-    show_stats = show_stats or cfg.get("stats", False)
-    sound = sound or cfg.get("sound", False)
-    quiet = quiet or cfg.get("quiet", False)
-    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt, resume_id, show_stats, sound, quiet))
+    # Require a real terminal
+    if not sys.stdin.isatty():
+        console.print("[bold red]Error:[/bold red] llaminal requires an interactive terminal.")
+        raise SystemExit(1)
+
+    asyncio.run(
+        _run_shell(
+            base_url, model, api_key, temperature, system_prompt,
+            resume_id, show_stats, shell_cmd, context_lines,
+        )
+    )
 
 
 def _auto_detect() -> str | None:
     """Scan common ports for a running LLM server. Returns base_url or None."""
-    console.print("[dim]Scanning for LLM servers...[/dim]")
     found = asyncio.run(discover_servers())
 
     if not found:
         return None
 
     if len(found) == 1:
-        url, label = found[0]
-        console.print(f"[dim]Found {label} at {url}[/dim]")
+        url, _label = found[0]
         return url
 
-    # Multiple servers found — prompt user to choose
-    console.print("[dim]Found multiple servers:[/dim]")
-    for i, (url, label) in enumerate(found, 1):
-        console.print(f"  [bold]{i}[/bold]) {label} — {url}")
-
-    while True:
-        try:
-            choice = input(f"  Choose [1-{len(found)}]: ").strip()
-            idx = int(choice) - 1
-            if 0 <= idx < len(found):
-                return found[idx][0]
-        except (ValueError, EOFError, KeyboardInterrupt):
-            return None
+    # Multiple servers — just pick the first one (no interactive prompt in raw mode)
+    url, _label = found[0]
+    return url
 
 
 if __name__ == "__main__":

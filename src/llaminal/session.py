@@ -20,8 +20,18 @@ class Session:
         self.messages: list[dict] = [
             {"role": "system", "content": system_prompt or SYSTEM_PROMPT}
         ]
+        self._shell_context: str | None = None
+
+    def set_shell_context(self, text: str) -> None:
+        """Set terminal context to be prepended to the next user message."""
+        self._shell_context = text
 
     def add_user(self, content: str) -> None:
+        if self._shell_context:
+            content = (
+                f"[Recent terminal output]\n{self._shell_context}\n\n{content}"
+            )
+            self._shell_context = None
         self.messages.append({"role": "user", "content": content})
 
     def add_assistant(self, content: str) -> None:

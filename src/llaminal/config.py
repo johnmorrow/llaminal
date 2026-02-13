@@ -18,6 +18,8 @@ DEFAULTS: dict[str, Any] = {
     "api_key": None,
     "temperature": None,
     "system_prompt": None,
+    "shell": None,
+    "context_lines": 50,
 }
 
 
