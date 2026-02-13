@@ -42,15 +42,12 @@ async def _run_shell(
     shell: str | None = None,
     context_lines: int = 50,
 ) -> None:
-    from llaminal.ai_mode import AIMode
-    from llaminal.shell import ShellWrapper
+    import os
 
-    # Optional pyte scrollback
-    try:
-        import pyte
-        has_pyte = True
-    except ImportError:
-        has_pyte = False
+    from llaminal.ai_mode import AIMode
+    from llaminal.cwd_tracker import CwdTracker
+    from llaminal.scrollback import ScrollbackCapture
+    from llaminal.shell import ShellWrapper
 
     # Build AI components
     client = None
@@ -82,40 +79,48 @@ async def _run_shell(
     # Create shell wrapper
     wrapper = ShellWrapper(shell=shell)
 
-    # Set up pyte scrollback capture
-    pyte_screen = None
-    pyte_stream = None
-    if has_pyte:
-        import os
-        size = os.get_terminal_size()
-        pyte_screen = pyte.Screen(size.columns, size.lines)
-        pyte_screen.set_mode(pyte.modes.LNM)
-        pyte_stream = pyte.Stream(pyte_screen)
+    # Set up scrollback capture with HistoryScreen
+    size = os.get_terminal_size()
+    scrollback = ScrollbackCapture(size.columns, size.lines)
+    wrapper.add_master_output_callback(scrollback.feed)
+    wrapper.add_resize_callback(scrollback.resize)
 
-        def feed_pyte(data: bytes) -> None:
-            try:
-                pyte_stream.feed(data.decode("utf-8", errors="replace"))
-            except Exception:
-                pass
+    # Spawn shell first so we have child_pid for CwdTracker
+    wrapper.spawn()
 
-        wrapper.add_master_output_callback(feed_pyte)
+    # Track child shell's cwd
+    cwd_tracker = CwdTracker(wrapper.child_pid)
 
-    def get_scrollback_context() -> str | None:
-        """Extract recent terminal content from pyte screen."""
-        if pyte_screen is None:
-            return None
-        lines = []
-        display = pyte_screen.display
-        for line in display:
-            stripped = line.rstrip()
-            lines.append(stripped)
-        # Trim trailing empty lines
-        while lines and not lines[-1]:
-            lines.pop()
-        # Take last N lines
-        recent = lines[-context_lines:] if len(lines) > context_lines else lines
-        text = "\n".join(recent).strip()
-        return text if text else None
+    # Create PTY executor and register PTY bash tool (overrides subprocess-based one)
+    from llaminal.pty_executor import PtyExecutor
+    from llaminal.tools.registry import Tool
+
+    pty_executor = PtyExecutor(wrapper, scrollback)
+
+    async def _pty_bash(command: str) -> str:
+        ai_handler._pty_executing = True
+        try:
+            return await pty_executor.execute(command)
+        finally:
+            ai_handler._pty_executing = False
+
+    pty_bash_tool = Tool(
+        name="bash",
+        description="Run a shell command in the user's real shell and return its output. "
+        "Commands run with the user's PATH, aliases, virtualenvs, and SSH agent.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute",
+                },
+            },
+            "required": ["command"],
+        },
+        execute=_pty_bash,
+    )
+    registry.register(pty_bash_tool)
 
     # Create AI mode handler
     ai_handler = AIMode(
@@ -126,16 +131,16 @@ async def _run_shell(
         storage=storage,
         session_id=session_id,
         show_stats=show_stats,
-        context_provider=get_scrollback_context,
+        context_provider=lambda: scrollback.get_context(max_lines=context_lines),
+        cwd_provider=cwd_tracker.get_cwd,
     )
 
     # Wire up callbacks — shell only fires toggle(True) on double-ESC entry;
     # AIMode.exit() handles its own return to shell mode.
     wrapper.set_ai_mode_toggle_callback(lambda entering: ai_handler.enter() if entering else None)
     wrapper.set_ai_input_callback(ai_handler.handle_input)
-
-    # Spawn and run
-    wrapper.spawn()
+    wrapper.set_fix_it_callback(ai_handler.enter_fix_it)
+    wrapper.set_explain_it_callback(ai_handler.enter_explain_it)
     try:
         await wrapper.run()
     finally:

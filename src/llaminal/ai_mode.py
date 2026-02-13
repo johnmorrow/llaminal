@@ -7,18 +7,33 @@ import termios
 import tty
 
 from rich.console import Console
+from rich.text import Text
 
 from llaminal.agent import run_agent_loop
 from llaminal.client import LlaminalClient
 from llaminal.render import render_error
 from llaminal.session import Session
 from llaminal.storage import Storage
+from llaminal.themes import get_theme
 from llaminal.tools.registry import ToolRegistry
 
 console = Console()
 
-PROMPT = "\U0001f999> "  # 🦙>
-PROMPT_BYTES = PROMPT.encode("utf-8")
+PROMPT_TEXT = "\U0001f999> "  # 🦙>
+
+# Terminal title OSC sequences
+_TITLE_AI_MODE = b"\x1b]0;llaminal \xf0\x9f\xa6\x99 AI Mode\x07"  # 🦙
+_TITLE_RESET = b"\x1b]0;\x07"
+
+
+def _styled_prompt_bytes() -> bytes:
+    """Render the prompt with theme color as ANSI escape bytes."""
+    theme = get_theme()
+    t = Text(PROMPT_TEXT, style=theme.ai_prompt)
+    ansi_console = Console(force_terminal=True)
+    with ansi_console.capture() as capture:
+        ansi_console.print(t, end="")
+    return capture.get().encode("utf-8")
 
 
 class AIMode:
@@ -34,6 +49,7 @@ class AIMode:
         session_id: str,
         show_stats: bool = False,
         context_provider=None,
+        cwd_provider=None,
     ):
         self._shell = shell_wrapper
         self._client = client
@@ -43,12 +59,14 @@ class AIMode:
         self._session_id = session_id
         self._show_stats = show_stats
         self._context_provider = context_provider
+        self._cwd_provider = cwd_provider
 
         self._buffer = bytearray()
         self._cursor_pos = 0
         self._active = False
         self._save_index = len(session.messages)
         self._running_agent = False
+        self._pty_executing = False
 
     @property
     def active(self) -> bool:
@@ -60,15 +78,16 @@ class AIMode:
         self._buffer.clear()
         self._cursor_pos = 0
 
-        # Inject shell context if available
-        if self._context_provider:
-            context = self._context_provider()
-            if context:
-                self._session.set_shell_context(context)
+        # Inject shell context and cwd if available
+        context = self._context_provider() if self._context_provider else None
+        cwd = self._cwd_provider() if self._cwd_provider else None
+        if context or cwd:
+            self._session.set_shell_context(context or "", cwd=cwd)
 
-        # Move to a new line and show prompt
+        # Set terminal title and show prompt
+        self._write_output(_TITLE_AI_MODE)
         self._write_output(b"\r\n")
-        self._write_output(PROMPT_BYTES)
+        self._write_output(_styled_prompt_bytes())
 
     def exit(self) -> None:
         """Exit AI mode — return to shell."""
@@ -76,15 +95,52 @@ class AIMode:
         self._buffer.clear()
         self._cursor_pos = 0
         self._shell.exit_ai_mode()
+        self._write_output(_TITLE_RESET)
         self._write_output(b"\r\n")
+
+    def enter_fix_it(self) -> None:
+        """ESC-ESC-f shortcut: enter AI mode and auto-submit a fix-it query."""
+        self._enter_with_auto_query(
+            "The last command failed. Explain the error and suggest how to fix it.",
+            "[fix-it] Analyzing...",
+        )
+
+    def enter_explain_it(self) -> None:
+        """ESC-ESC-e shortcut: enter AI mode and auto-submit an explain query."""
+        self._enter_with_auto_query(
+            "Explain the output of the last command.",
+            "[explain] Analyzing...",
+        )
+
+    def _enter_with_auto_query(self, query: str, status_msg: str) -> None:
+        """Enter AI mode and immediately submit a query."""
+        self._active = True
+        self._buffer.clear()
+        self._cursor_pos = 0
+        self._shell.ai_mode = True
+
+        # Inject shell context and cwd
+        context = self._context_provider() if self._context_provider else None
+        cwd = self._cwd_provider() if self._cwd_provider else None
+        if context or cwd:
+            self._session.set_shell_context(context or "", cwd=cwd)
+
+        # Show status
+        self._write_output(b"\r\n")
+        self._write_output(f"\x1b[33m{status_msg}\x1b[0m\r\n".encode())
+
+        # Auto-submit the query
+        asyncio.get_running_loop().create_task(self._run_query(query))
 
     def handle_input(self, data: bytes) -> None:
         """Process raw input bytes while in AI mode."""
         if self._running_agent:
             # During agent execution, only handle Ctrl+C
             if b"\x03" in data:
-                # Ctrl+C — raise KeyboardInterrupt in the running task
-                pass
+                if self._pty_executing:
+                    # Forward Ctrl+C to PTY during tool execution
+                    self._shell.write_to_shell(b"\x03")
+                # else: KeyboardInterrupt is handled by the agent loop
             return
 
         i = 0
@@ -120,7 +176,7 @@ class AIMode:
                     asyncio.get_running_loop().create_task(self._run_query(line))
                 else:
                     # Empty enter — just redraw prompt
-                    self._write_output(PROMPT_BYTES)
+                    self._write_output(_styled_prompt_bytes())
                 self._buffer.clear()
                 self._cursor_pos = 0
 
@@ -134,7 +190,7 @@ class AIMode:
                 self._buffer.clear()
                 self._cursor_pos = 0
                 self._write_output(b"^C\r\n")
-                self._write_output(PROMPT_BYTES)
+                self._write_output(_styled_prompt_bytes())
 
             elif b == 0x04:  # Ctrl+D
                 if not self._buffer:
@@ -182,7 +238,7 @@ class AIMode:
         """Redraw the current input line."""
         self._write_output(b"\r")
         self._write_output(b"\x1b[K")  # Clear line
-        self._write_output(PROMPT_BYTES)
+        self._write_output(_styled_prompt_bytes())
         text = self._buffer.decode("utf-8", errors="replace")
         self._write_output(text.encode("utf-8"))
         # Move cursor to correct position
@@ -204,7 +260,7 @@ class AIMode:
                 b"\x1b[33mNo model server found. Run `ollama serve` or "
                 b"`llama-server` to enable AI.\x1b[0m\r\n"
             )
-            self._write_output(PROMPT_BYTES)
+            self._write_output(_styled_prompt_bytes())
             return
 
         self._running_agent = True
@@ -233,7 +289,7 @@ class AIMode:
             # Return to raw mode for PTY proxying
             self._shell_to_raw()
             self._running_agent = False
-            self._write_output(PROMPT_BYTES)
+            self._write_output(_styled_prompt_bytes())
 
     def _shell_to_cooked(self) -> None:
         """Temporarily restore terminal to cooked mode for Rich output."""

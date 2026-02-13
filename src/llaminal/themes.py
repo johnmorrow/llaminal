@@ -17,6 +17,7 @@ class Theme:
     result_border: str  # tool result panel border
     error: str  # error text
     warning: str  # warning/cancel text
+    ai_prompt: str  # 🦙> prompt color in AI mode
 
 
 THEMES: dict[str, Theme] = {
@@ -31,6 +32,7 @@ THEMES: dict[str, Theme] = {
         result_border="green",
         error="bold red",
         warning="yellow",
+        ai_prompt="bold magenta",
     ),
     "light": Theme(
         name="light",
@@ -43,6 +45,7 @@ THEMES: dict[str, Theme] = {
         result_border="rgb(0,130,60)",
         error="bold red",
         warning="rgb(180,120,0)",
+        ai_prompt="bold blue",
     ),
     "solarized": Theme(
         name="solarized",
@@ -55,6 +58,7 @@ THEMES: dict[str, Theme] = {
         result_border="rgb(133,153,0)",  # solarized green
         error="bold rgb(220,50,47)",  # solarized red
         warning="rgb(203,75,22)",  # solarized orange
+        ai_prompt="bold rgb(38,139,210)",  # solarized blue
     ),
     "dracula": Theme(
         name="dracula",
@@ -67,6 +71,7 @@ THEMES: dict[str, Theme] = {
         result_border="rgb(80,250,123)",  # dracula green
         error="bold rgb(255,85,85)",  # dracula red
         warning="rgb(241,250,140)",  # dracula yellow
+        ai_prompt="bold rgb(189,147,249)",  # dracula purple
     ),
     "catppuccin": Theme(
         name="catppuccin",
@@ -79,6 +84,7 @@ THEMES: dict[str, Theme] = {
         result_border="rgb(166,227,161)",  # catppuccin green
         error="bold rgb(243,139,168)",  # catppuccin red
         warning="rgb(249,226,175)",  # catppuccin yellow
+        ai_prompt="bold rgb(203,166,247)",  # catppuccin mauve
     ),
     "llama": Theme(
         name="llama",
@@ -91,6 +97,7 @@ THEMES: dict[str, Theme] = {
         result_border="rgb(140,170,80)",  # desert sage
         error="bold rgb(200,60,40)",  # terracotta
         warning="rgb(220,180,60)",  # golden
+        ai_prompt="bold rgb(210,140,60)",  # warm amber
     ),
 }
 

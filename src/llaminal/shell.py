@@ -22,18 +22,26 @@ class ShellWrapper:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._running = False
 
-        # Escape detection state
+        # Escape detection state machine (3-state)
+        # IDLE → ESC_PENDING (300ms) → DOUBLE_ESC (200ms shortcut window)
         self._esc_pending = False
+        self._double_esc_pending = False
         self._esc_timer: asyncio.TimerHandle | None = None
-        self._ESC_TIMEOUT = 0.3  # 300ms
+        self._shortcut_timer: asyncio.TimerHandle | None = None
+        self._ESC_TIMEOUT = 0.3  # 300ms for single ESC
+        self._SHORTCUT_TIMEOUT = 0.2  # 200ms for shortcut key after double-ESC
 
-        # Mode flag
+        # Mode flags
         self._ai_mode = False
+        self._show_pty_output = False  # when True, show PTY output during AI mode
 
         # Callbacks for subclasses / composition
         self._on_master_output: list = []  # called with bytes from master_fd
+        self._on_resize: list = []  # called with (rows, cols) on SIGWINCH
         self._ai_input_callback = None
         self._ai_mode_toggle_callback = None
+        self._fix_it_callback = None
+        self._explain_it_callback = None
 
     @property
     def master_fd(self) -> int:
@@ -62,6 +70,22 @@ class ShellWrapper:
     def set_ai_mode_toggle_callback(self, cb) -> None:
         """Set callback for AI mode toggle events. cb(entering: bool)."""
         self._ai_mode_toggle_callback = cb
+
+    def add_resize_callback(self, cb) -> None:
+        """Register a callback that receives (rows, cols) on terminal resize."""
+        self._on_resize.append(cb)
+
+    def set_fix_it_callback(self, cb) -> None:
+        """Set callback for ESC-ESC-f shortcut."""
+        self._fix_it_callback = cb
+
+    def set_explain_it_callback(self, cb) -> None:
+        """Set callback for ESC-ESC-e shortcut."""
+        self._explain_it_callback = cb
+
+    def set_show_pty_output(self, value: bool) -> None:
+        """Enable/disable PTY output display during AI mode (for tool execution)."""
+        self._show_pty_output = value
 
     def _get_terminal_size(self) -> tuple[int, int]:
         """Return (rows, cols) of the current terminal."""
@@ -121,6 +145,12 @@ class ShellWrapper:
                 os.kill(self._child_pid, signal.SIGWINCH)
             except ProcessLookupError:
                 pass
+        # Notify resize callbacks (e.g., pyte scrollback)
+        for cb in self._on_resize:
+            try:
+                cb(rows, cols)
+            except Exception:
+                pass
 
     def _handle_sigchld(self, signum, frame) -> None:
         """Detect child exit."""
@@ -152,19 +182,44 @@ class ShellWrapper:
         self._process_stdin_bytes(data)
 
     def _process_stdin_bytes(self, data: bytes) -> None:
-        """Process stdin bytes with escape detection state machine."""
+        """Process stdin bytes with 3-state escape detection.
+
+        IDLE --[ESC]--> ESC_PENDING (300ms timer)
+        ESC_PENDING --[ESC]--> DOUBLE_ESC (200ms shortcut timer)
+        ESC_PENDING --[timeout]--> IDLE (flush ESC to shell)
+        ESC_PENDING --[other]--> IDLE (flush ESC + byte to shell)
+        DOUBLE_ESC --['f' within 200ms]--> fix_it_callback, IDLE
+        DOUBLE_ESC --['e' within 200ms]--> explain_it_callback, IDLE
+        DOUBLE_ESC --[timeout]--> enter AI mode, IDLE
+        DOUBLE_ESC --[other]--> enter AI mode, IDLE
+        """
         i = 0
         while i < len(data):
             byte = data[i : i + 1]
             i += 1
 
-            if byte == b"\x1b":
+            if self._double_esc_pending:
+                # In DOUBLE_ESC state — check for shortcut key
+                self._cancel_shortcut_timer()
+                self._double_esc_pending = False
+                if byte == b"f" and self._fix_it_callback:
+                    self._fix_it_callback()
+                    return
+                elif byte == b"e" and self._explain_it_callback:
+                    self._explain_it_callback()
+                    return
+                else:
+                    # Not a shortcut — enter normal AI mode
+                    self._enter_ai_mode()
+                    return
+            elif byte == b"\x1b":
                 if self._esc_pending:
-                    # Second ESC within timeout → toggle AI mode
+                    # Second ESC within timeout → enter DOUBLE_ESC state
                     self._cancel_esc_timer()
                     self._esc_pending = False
-                    self._enter_ai_mode()
-                    return  # Drop any remaining bytes
+                    self._double_esc_pending = True
+                    self._start_shortcut_timer()
+                    # Check if there are more bytes to consume for shortcut
                 else:
                     # First ESC → start timer
                     self._esc_pending = True
@@ -174,7 +229,6 @@ class ShellWrapper:
                     # Non-ESC byte while waiting → forward the pending ESC + this byte
                     self._cancel_esc_timer()
                     self._esc_pending = False
-                    # Forward ESC + remaining data
                     remaining = b"\x1b" + data[i - 1 :]
                     self._write_to_master(remaining)
                     return
@@ -199,6 +253,25 @@ class ShellWrapper:
         self._esc_pending = False
         self._esc_timer = None
         self._write_to_master(b"\x1b")
+
+    def _start_shortcut_timer(self) -> None:
+        """Start the 200ms timeout for shortcut key after double-ESC."""
+        if self._loop:
+            self._shortcut_timer = self._loop.call_later(
+                self._SHORTCUT_TIMEOUT, self._shortcut_timeout_fired
+            )
+
+    def _cancel_shortcut_timer(self) -> None:
+        """Cancel the pending shortcut timer."""
+        if self._shortcut_timer is not None:
+            self._shortcut_timer.cancel()
+            self._shortcut_timer = None
+
+    def _shortcut_timeout_fired(self) -> None:
+        """Shortcut window expired — enter normal AI mode."""
+        self._double_esc_pending = False
+        self._shortcut_timer = None
+        self._enter_ai_mode()
 
     def _enter_ai_mode(self) -> None:
         """Enter AI mode via double-ESC."""
@@ -230,8 +303,9 @@ class ShellWrapper:
             self._running = False
             return
 
-        # Write to stdout (user sees shell output) — suppress during AI mode
-        if not self._ai_mode:
+        # Write to stdout (user sees shell output)
+        # Suppress during AI mode unless PTY tool execution is active
+        if not self._ai_mode or self._show_pty_output:
             try:
                 os.write(sys.stdout.fileno(), data)
             except OSError:

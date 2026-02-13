@@ -22,16 +22,22 @@ class Session:
         ]
         self._shell_context: str | None = None
 
-    def set_shell_context(self, text: str) -> None:
+    def set_shell_context(self, text: str, cwd: str | None = None) -> None:
         """Set terminal context to be prepended to the next user message."""
         self._shell_context = text
+        self._shell_cwd = cwd
 
     def add_user(self, content: str) -> None:
+        prefix_parts = []
+        if hasattr(self, "_shell_cwd") and self._shell_cwd:
+            prefix_parts.append(f"[Working directory: {self._shell_cwd}]")
         if self._shell_context:
-            content = (
-                f"[Recent terminal output]\n{self._shell_context}\n\n{content}"
-            )
+            prefix_parts.append(f"[Recent terminal output]\n{self._shell_context}")
+        if prefix_parts:
+            prefix = "\n".join(prefix_parts)
+            content = f"{prefix}\n\n{content}"
             self._shell_context = None
+            self._shell_cwd = None
         self.messages.append({"role": "user", "content": content})
 
     def add_assistant(self, content: str) -> None:
