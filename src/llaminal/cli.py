@@ -13,6 +13,7 @@ from rich.text import Text
 from llaminal.agent import run_agent_loop
 from llaminal.client import LlaminalClient
 from llaminal.config import DEFAULTS, load_config, resolve
+from llaminal.discover import discover_servers
 from llaminal.session import Session
 from llaminal.tools.bash import bash_tool
 from llaminal.tools.files import list_files_tool, read_file_tool, write_file_tool
@@ -116,17 +117,56 @@ def main(
     temperature = resolve(temperature, cfg.get("temperature"), DEFAULTS["temperature"])
     system_prompt = resolve(system_prompt, cfg.get("system_prompt"), DEFAULTS["system_prompt"])
 
-    # Base URL resolution: --base-url > --port > config base_url > config port > default
+    # Base URL resolution: --base-url > --port > config base_url > config port > auto-detect
     if base_url is None:
         if port is not None:
             base_url = f"http://localhost:{port}"
         else:
             base_url = resolve(None, cfg.get("base_url"), None)
-            if base_url is None:
-                cfg_port = cfg.get("port", DEFAULTS["port"])
-                base_url = f"http://localhost:{cfg_port}"
+            if base_url is None and cfg.get("port") is not None:
+                base_url = f"http://localhost:{cfg['port']}"
+
+    if base_url is None:
+        # No explicit server configured — try auto-detection
+        base_url = _auto_detect()
+
+    if base_url is None:
+        console.print("[bold red]Error:[/bold red] No LLM server found.")
+        console.print("[dim]Start a server and retry, or specify one explicitly:\n")
+        console.print("  llama-server -m model.gguf --port 8080")
+        console.print("  llaminal --base-url http://localhost:8080")
+        console.print("  llaminal --port 8080[/dim]")
+        raise SystemExit(1)
 
     asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt))
+
+
+def _auto_detect() -> str | None:
+    """Scan common ports for a running LLM server. Returns base_url or None."""
+    console.print("[dim]Scanning for LLM servers...[/dim]")
+    found = asyncio.run(discover_servers())
+
+    if not found:
+        return None
+
+    if len(found) == 1:
+        url, label = found[0]
+        console.print(f"[dim]Found {label} at {url}[/dim]")
+        return url
+
+    # Multiple servers found — prompt user to choose
+    console.print("[dim]Found multiple servers:[/dim]")
+    for i, (url, label) in enumerate(found, 1):
+        console.print(f"  [bold]{i}[/bold]) {label} — {url}")
+
+    while True:
+        try:
+            choice = input(f"  Choose [1-{len(found)}]: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(found):
+                return found[idx][0]
+        except (ValueError, EOFError, KeyboardInterrupt):
+            return None
 
 
 if __name__ == "__main__":
