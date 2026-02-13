@@ -8,6 +8,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from llaminal.agent import run_agent_loop
@@ -15,6 +16,7 @@ from llaminal.client import LlaminalClient
 from llaminal.config import DEFAULTS, load_config, resolve
 from llaminal.discover import discover_servers
 from llaminal.session import Session
+from llaminal.storage import Storage
 from llaminal.tools.bash import bash_tool
 from llaminal.tools.files import list_files_tool, read_file_tool, write_file_tool
 from llaminal.tools.registry import ToolRegistry
@@ -38,12 +40,33 @@ async def _main_loop(
     api_key: str | None,
     temperature: float | None,
     system_prompt: str | None,
+    resume_id: str | None,
 ) -> None:
     client = LlaminalClient(
         base_url=base_url, model=model, api_key=api_key, temperature=temperature
     )
-    session = Session(system_prompt=system_prompt)
+    storage = Storage()
     registry = build_registry()
+
+    # Resume existing session or start new one
+    if resume_id:
+        messages = storage.load_session(resume_id)
+        if not messages:
+            console.print(f"[bold red]Error:[/bold red] Session '{resume_id}' not found.")
+            await client.close()
+            storage.close()
+            return
+        session = Session(system_prompt=system_prompt)
+        session.messages = messages
+        session_id = resume_id
+        save_index = len(messages)
+        console.print(f"[dim]Resumed session {session_id}[/dim]\n")
+    else:
+        session = Session(system_prompt=system_prompt)
+        session_id = storage.create_session(model)
+        # Save the system prompt message
+        storage.save_messages(session_id, session.messages, 0)
+        save_index = len(session.messages)
 
     # Welcome banner
     brown = "rgb(160,100,50)"
@@ -86,9 +109,39 @@ async def _main_loop(
         except KeyboardInterrupt:
             console.print("\n[yellow]Generation cancelled.[/yellow]")
 
+        # Persist new messages
+        storage.save_messages(session_id, session.messages, save_index)
+        save_index = len(session.messages)
+
         console.print()
 
     await client.close()
+    storage.close()
+
+
+def _show_history() -> None:
+    """Display recent conversation sessions."""
+    storage = Storage()
+    sessions = storage.list_sessions()
+    storage.close()
+
+    if not sessions:
+        console.print("[dim]No conversation history yet.[/dim]")
+        return
+
+    table = Table(title="Recent Sessions", border_style="dim")
+    table.add_column("ID", style="bold")
+    table.add_column("Title")
+    table.add_column("Model", style="dim")
+    table.add_column("Messages", justify="right")
+    table.add_column("Date", style="dim")
+
+    for s in sessions:
+        date = s["created_at"][:10]
+        table.add_row(s["id"], s["title"], s["model"], str(s["message_count"]), date)
+
+    console.print(table)
+    console.print("\n[dim]Resume a session with: llaminal --resume <ID>[/dim]")
 
 
 @click.command()
@@ -99,6 +152,8 @@ async def _main_loop(
 @click.option("--temperature", default=None, type=float, help="Sampling temperature for the model.")
 @click.option("--system-prompt", default=None, help="Override the default system prompt.")
 @click.option("--config", "config_path", default=None, type=click.Path(exists=True, path_type=Path), help="Path to config file (default: ~/.config/llaminal/config.toml).")
+@click.option("--resume", "resume_id", default=None, help="Resume a previous session (ID, or 'last' for most recent).")
+@click.option("--history", "show_history", is_flag=True, help="Show recent conversation sessions.")
 def main(
     port: int | None,
     base_url: str | None,
@@ -107,8 +162,14 @@ def main(
     temperature: float | None,
     system_prompt: str | None,
     config_path: Path | None,
+    resume_id: str | None,
+    show_history: bool,
 ) -> None:
     """Llaminal — an agentic CLI for local LLMs."""
+    if show_history:
+        _show_history()
+        return
+
     cfg = load_config(config_path)
 
     # Resolve each setting: CLI flag > env var (handled by Click for api_key) > config > default
@@ -138,7 +199,16 @@ def main(
         console.print("  llaminal --port 8080[/dim]")
         raise SystemExit(1)
 
-    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt))
+    # Resolve --resume last
+    if resume_id == "last":
+        storage = Storage()
+        resume_id = storage.get_latest_session_id()
+        storage.close()
+        if resume_id is None:
+            console.print("[bold red]Error:[/bold red] No previous sessions to resume.")
+            raise SystemExit(1)
+
+    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt, resume_id))
 
 
 def _auto_detect() -> str | None:
