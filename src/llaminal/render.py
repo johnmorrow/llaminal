@@ -14,7 +14,7 @@ from llaminal.themes import get_theme
 console = Console()
 
 LLAMA = "\U0001f999"  # 🦙
-DOT_TRAIL = "·" * 20
+DOT_TRAIL = "." * 3
 
 
 class StreamRenderer:
@@ -44,15 +44,23 @@ class StreamRenderer:
         self._thinking_thread.start()
 
     def _animate_thinking(self) -> None:
-        """Animate the llama eating dots until first token or stop."""
+        """Animate the llama eating dots left-to-right (pac-man style)."""
         trail = DOT_TRAIL
+        width = len(trail)
         while not self._thinking_stop.is_set():
-            for i in range(len(trail) + 1):
+            for i in range(width + 1):
                 if self._thinking_stop.is_set():
                     return
-                frame = f"  {' ' * i}{LLAMA}{trail[i:]}"
-                self._live.update(Text(frame, style="dim"))
-                time.sleep(0.12)
+                dots = trail[: width - i]
+                padding = " " * i
+                frame = Text()
+                frame.append("[", style="dim")
+                frame.append(dots, style="green")
+                frame.append(LLAMA)
+                frame.append(padding)
+                frame.append("]", style="dim")
+                self._live.update(frame)
+                time.sleep(0.50)
 
     def _stop_thinking(self) -> None:
         """Stop the thinking animation."""
