@@ -5,7 +5,7 @@ import json
 import httpx
 
 from llaminal.client import LlaminalClient
-from llaminal.render import render_error, render_tool_call, render_tool_result
+from llaminal.render import StreamRenderer, render_error, render_tool_call, render_tool_result
 from llaminal.session import Session
 from llaminal.tools.registry import ToolRegistry
 
@@ -17,19 +17,18 @@ async def run_agent_loop(
 ) -> None:
     """Run the agent loop until the model produces a plain text response (no tool calls)."""
     while True:
-        content_parts: list[str] = []
+        renderer = StreamRenderer()
         tool_calls_by_index: dict[int, dict] = {}
 
         try:
+            renderer.start()
             async for delta in client.stream_chat(
                 session.get_messages(),
                 tools=registry.to_openai_schema() or None,
             ):
-                # Accumulate content tokens
+                # Accumulate and render content tokens
                 if delta.content:
-                    content_parts.append(delta.content)
-                    # Stream tokens to terminal
-                    print(delta.content, end="", flush=True)
+                    renderer.update(delta.content)
 
                 # Accumulate tool call deltas
                 if delta.tool_calls:
@@ -50,14 +49,14 @@ async def run_agent_loop(
 
         except KeyboardInterrupt:
             # Ctrl+C mid-stream: save what we have, don't corrupt session
-            full_content = "".join(content_parts)
+            renderer.stop()
+            full_content = renderer.get_text()
             if full_content:
-                print()
                 session.add_assistant(full_content)
             raise
 
         except httpx.ConnectError:
-            print()
+            renderer.stop()
             render_error(
                 f"Could not connect to {client.base_url}.\n"
                 "  Is your LLM server running? Try:\n"
@@ -67,7 +66,7 @@ async def run_agent_loop(
             return
 
         except httpx.TimeoutException:
-            print()
+            renderer.stop()
             render_error(
                 "Request timed out. The model may be loading or the server may be overloaded.\n"
                 "  Try again in a moment."
@@ -76,7 +75,7 @@ async def run_agent_loop(
             return
 
         except (httpx.RemoteProtocolError, httpx.ReadError):
-            print()
+            renderer.stop()
             render_error(
                 "Connection was interrupted. The server may have closed unexpectedly.\n"
                 "  Check that your server is still running and try again."
@@ -85,7 +84,7 @@ async def run_agent_loop(
             return
 
         except httpx.HTTPStatusError as e:
-            print()
+            renderer.stop()
             code = e.response.status_code
             if code in (401, 403):
                 render_error(
@@ -107,24 +106,22 @@ async def run_agent_loop(
             return
 
         except Exception as e:
-            print()
+            renderer.stop()
             render_error(f"Unexpected error: {e}")
             return
 
-        full_content = "".join(content_parts)
+        full_content = renderer.get_text()
         tool_calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
 
-        # End streaming line
-        if full_content:
-            print()
-
         if not tool_calls:
-            # Plain text response — turn is complete
+            # Plain text response — finalize as Markdown, turn is complete
+            renderer.finalize()
             if full_content:
                 session.add_assistant(full_content)
             return
 
-        # We have tool calls — record them and execute
+        # We have tool calls — stop streaming display, record and execute
+        renderer.stop()
         session.add_assistant_tool_calls(full_content or None, tool_calls)
 
         for tc in tool_calls:
