@@ -23,13 +23,20 @@ llaminal --system-prompt "..."
 export LLAMINAL_API_KEY=sk-...
 
 # Config file (optional): ~/.config/llaminal/config.toml
-# Supported keys: base_url, port, model, api_key, temperature, system_prompt
+# Supported keys: base_url, port, model, api_key, temperature, system_prompt, mood, theme, stats, sound, quiet
 llaminal --config /path/to/alt/config.toml
 
 # Session management
 llaminal --history             # list past sessions
 llaminal --resume last         # resume most recent session
 llaminal --resume <session-id> # resume specific session
+
+# Personality & display
+llaminal --mood pirate         # persona presets: pirate, poet, senior-engineer, eli5, concise, rubber-duck
+llaminal --theme dracula       # color themes: default, light, solarized, dracula, catppuccin, llama
+llaminal --stats               # show token/sec and latency after each response
+llaminal --sound               # terminal bell when long responses finish (>3s)
+llaminal --quiet               # suppress startup banner
 
 # No tests or linting configured yet
 ```
@@ -41,11 +48,14 @@ The source lives in `src/llaminal/` with entry point `cli.py:main()`.
 **Core loop**: User input → `agent.py:run_agent_loop()` streams the LLM response via Rich Live → if tool calls are present, executes them via the tool registry, appends results to session history, and re-prompts the model. The loop exits when the model produces plain text with no tool calls. Messages are auto-saved to SQLite after each exchange.
 
 **Key modules**:
-- `cli.py` — Click CLI setup, prompt loop, welcome banner, server auto-detection, session resume/history
+- `cli.py` — Click CLI setup, prompt loop, server auto-detection, session resume/history. Resolves all settings with precedence chain.
 - `agent.py` — Agentic loop: stream response, parse tool calls, execute, repeat. Every error path has an actionable user-facing message (connection refused, auth failure, timeout, etc).
 - `client.py` — `LlaminalClient` wraps httpx for async SSE streaming to `/v1/chat/completions`. Supports API key auth (Bearer token) and temperature. Skips malformed JSON chunks.
 - `session.py` — Manages OpenAI-format message history; contains the default system prompt
-- `render.py` — `StreamRenderer` class wraps Rich `Live` for word-wrapped token streaming at 10fps. On completion, `finalize()` replaces streamed text with rendered Markdown (syntax-highlighted code blocks, tables, headers). Also has helpers for tool call panels, tool result panels, and errors.
+- `render.py` — `StreamRenderer` class wraps Rich `Live` for word-wrapped token streaming at 10fps. Includes a pac-man style llama-eating-dots thinking animation (background thread) and optional token/sec stats. On completion, `finalize()` replaces streamed text with rendered Markdown. Tool call panels, result panels, and errors all use the active theme.
+- `banners.py` — Rotating startup banners with llama art variants (classic, chill, wink, sleepy) and random one-liners. Uses active theme for colors.
+- `moods.py` — Six mood presets that override the system prompt: pirate, poet, senior-engineer, eli5, concise, rubber-duck.
+- `themes.py` — Color theme system with semantic roles (accent, llama_body, tool_border, etc). Six built-in themes: default, light, solarized, dracula, catppuccin, llama. Module-level `get_theme()`/`set_theme()` for global access.
 - `config.py` — Loads `~/.config/llaminal/config.toml` (TOML via tomllib/tomli). `resolve()` applies precedence: CLI flags > env vars > config file > defaults.
 - `discover.py` — Probes ports 8080, 11434, 8000, 5000, 1234 for running LLM servers via `GET /v1/models`. Auto-connects if one found, prompts if multiple.
 - `storage.py` — `Storage` class wraps SQLite at `~/.local/share/llaminal/history.db`. Sessions table + messages table. Auto-titles sessions from first user message. Supports create, save, load, list, get_latest.
@@ -63,4 +73,4 @@ The source lives in `src/llaminal/` with entry point `cli.py:main()`.
 
 ## Roadmap
 
-The product roadmap lives in `~/Downloads/llaminal-roadmap.md`. The MVP PRD is at `docs/prd/Llaminal_MVP_PRD_Revised.md`. Stage 1 ("Solid Ground") is complete.
+The product roadmap lives in `~/Downloads/llaminal-roadmap.md`. The MVP PRD is at `docs/prd/Llaminal_MVP_PRD_Revised.md`. Stages 1 ("Solid Ground") and 2 ("Alive") are complete.
