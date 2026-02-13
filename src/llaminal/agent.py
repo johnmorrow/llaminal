@@ -56,23 +56,59 @@ async def run_agent_loop(
                 session.add_assistant(full_content)
             raise
 
-        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
-            # Network failures: surface error, keep session intact for retry
+        except httpx.ConnectError:
             print()
-            render_error(f"Connection error: {e}")
-            # Remove the last user message so the user can retry
-            if session.messages and session.messages[-1]["role"] == "user":
-                session.messages.pop()
+            render_error(
+                f"Could not connect to {client.base_url}.\n"
+                "  Is your LLM server running? Try:\n"
+                "    llama-server -m model.gguf --port 8080"
+            )
+            _pop_last_user_message(session)
+            return
+
+        except httpx.TimeoutException:
+            print()
+            render_error(
+                "Request timed out. The model may be loading or the server may be overloaded.\n"
+                "  Try again in a moment."
+            )
+            _pop_last_user_message(session)
+            return
+
+        except (httpx.RemoteProtocolError, httpx.ReadError):
+            print()
+            render_error(
+                "Connection was interrupted. The server may have closed unexpectedly.\n"
+                "  Check that your server is still running and try again."
+            )
+            _pop_last_user_message(session)
             return
 
         except httpx.HTTPStatusError as e:
             print()
-            render_error(f"Server returned {e.response.status_code}: {e.response.text[:200]}")
+            code = e.response.status_code
+            if code in (401, 403):
+                render_error(
+                    f"Authentication failed (HTTP {code}).\n"
+                    "  Check your --api-key or LLAMINAL_API_KEY environment variable."
+                )
+            elif code == 404:
+                render_error(
+                    f"Endpoint not found (HTTP 404) at {client.base_url}.\n"
+                    "  Is this an OpenAI-compatible server? Check your --base-url."
+                )
+            elif code >= 500:
+                render_error(
+                    f"Server error (HTTP {code}). The LLM server may be overloaded or misconfigured.\n"
+                    f"  {e.response.text[:200]}"
+                )
+            else:
+                render_error(f"Server returned HTTP {code}: {e.response.text[:200]}")
             return
 
         except Exception as e:
             print()
-            render_error(str(e))
+            render_error(f"Unexpected error: {e}")
             return
 
         full_content = "".join(content_parts)
@@ -104,3 +140,9 @@ async def run_agent_loop(
             session.add_tool_result(tc["id"], result)
 
         # Loop back to re-prompt the model with tool results
+
+
+def _pop_last_user_message(session: Session) -> None:
+    """Remove the last user message so the user can retry after a failure."""
+    if session.messages and session.messages[-1]["role"] == "user":
+        session.messages.pop()
