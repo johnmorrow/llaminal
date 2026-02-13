@@ -123,9 +123,14 @@ class ShellWrapper:
             if slave_fd > 2:
                 os.close(slave_fd)
 
-            # Exec the shell as a login shell
+            # Exec the shell as an interactive (non-login) shell.
+            # The user's terminal already ran login scripts; llaminal is a
+            # sub-shell, so we want .bashrc / .zshrc / config.fish loaded.
+            # -i forces interactive mode so rc file guards (e.g. $- check) pass.
+            # Reset SHLVL so the shell thinks it's a fresh terminal session.
+            os.environ["SHLVL"] = "0"
             shell_name = os.path.basename(self._shell)
-            os.execv(self._shell, [f"-{shell_name}"])
+            os.execv(self._shell, [shell_name, "-i"])
         else:
             # Parent process
             os.close(slave_fd)
