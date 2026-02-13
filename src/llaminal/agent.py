@@ -14,10 +14,11 @@ async def run_agent_loop(
     client: LlaminalClient,
     session: Session,
     registry: ToolRegistry,
+    show_stats: bool = False,
 ) -> None:
     """Run the agent loop until the model produces a plain text response (no tool calls)."""
     while True:
-        renderer = StreamRenderer()
+        renderer = StreamRenderer(show_stats=show_stats)
         tool_calls_by_index: dict[int, dict] = {}
 
         try:

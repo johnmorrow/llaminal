@@ -1,6 +1,7 @@
 """Entry point — input loop, Rich rendering, click CLI."""
 
 import asyncio
+import time
 from pathlib import Path
 
 import click
@@ -15,6 +16,7 @@ from llaminal.agent import run_agent_loop
 from llaminal.client import LlaminalClient
 from llaminal.config import DEFAULTS, load_config, resolve
 from llaminal.discover import discover_servers
+from llaminal.moods import MOOD_NAMES, MOODS
 from llaminal.session import Session
 from llaminal.storage import Storage
 from llaminal.tools.bash import bash_tool
@@ -41,6 +43,8 @@ async def _main_loop(
     temperature: float | None,
     system_prompt: str | None,
     resume_id: str | None,
+    show_stats: bool = False,
+    sound: bool = False,
 ) -> None:
     client = LlaminalClient(
         base_url=base_url, model=model, api_key=api_key, temperature=temperature
@@ -104,10 +108,14 @@ async def _main_loop(
         session.add_user(user_input)
         console.print()
 
+        t0 = time.monotonic()
         try:
-            await run_agent_loop(client, session, registry)
+            await run_agent_loop(client, session, registry, show_stats=show_stats)
         except KeyboardInterrupt:
             console.print("\n[yellow]Generation cancelled.[/yellow]")
+
+        if sound and (time.monotonic() - t0) > 3.0:
+            print("\a", end="", flush=True)
 
         # Persist new messages
         storage.save_messages(session_id, session.messages, save_index)
@@ -154,6 +162,9 @@ def _show_history() -> None:
 @click.option("--config", "config_path", default=None, type=click.Path(exists=True, path_type=Path), help="Path to config file (default: ~/.config/llaminal/config.toml).")
 @click.option("--resume", "resume_id", default=None, help="Resume a previous session (ID, or 'last' for most recent).")
 @click.option("--history", "show_history", is_flag=True, help="Show recent conversation sessions.")
+@click.option("--stats", "show_stats", is_flag=True, help="Show token/sec and latency stats after each response.")
+@click.option("--mood", default=None, type=click.Choice(MOOD_NAMES, case_sensitive=False), help="Use a persona preset (e.g. pirate, poet, senior-engineer).")
+@click.option("--sound", is_flag=True, help="Play a terminal bell when a long response finishes.")
 def main(
     port: int | None,
     base_url: str | None,
@@ -164,6 +175,9 @@ def main(
     config_path: Path | None,
     resume_id: str | None,
     show_history: bool,
+    show_stats: bool,
+    mood: str | None,
+    sound: bool,
 ) -> None:
     """Llaminal — an agentic CLI for local LLMs."""
     if show_history:
@@ -176,7 +190,18 @@ def main(
     model = resolve(model, cfg.get("model"), DEFAULTS["model"])
     api_key = resolve(api_key, cfg.get("api_key"), DEFAULTS["api_key"])
     temperature = resolve(temperature, cfg.get("temperature"), DEFAULTS["temperature"])
-    system_prompt = resolve(system_prompt, cfg.get("system_prompt"), DEFAULTS["system_prompt"])
+    # Mood resolution: --system-prompt > --mood > config mood > config system_prompt > default
+    if mood is None:
+        mood = cfg.get("mood")
+    if system_prompt is not None:
+        pass  # explicit --system-prompt wins
+    elif mood is not None:
+        if mood not in MOODS:
+            console.print(f"[bold red]Error:[/bold red] Unknown mood '{mood}'. Options: {', '.join(MOOD_NAMES)}")
+            raise SystemExit(1)
+        system_prompt = MOODS[mood]
+    else:
+        system_prompt = cfg.get("system_prompt")
 
     # Base URL resolution: --base-url > --port > config base_url > config port > auto-detect
     if base_url is None:
@@ -208,7 +233,9 @@ def main(
             console.print("[bold red]Error:[/bold red] No previous sessions to resume.")
             raise SystemExit(1)
 
-    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt, resume_id))
+    show_stats = show_stats or cfg.get("stats", False)
+    sound = sound or cfg.get("sound", False)
+    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt, resume_id, show_stats, sound))
 
 
 def _auto_detect() -> str | None:
