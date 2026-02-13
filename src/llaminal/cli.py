@@ -8,17 +8,17 @@ import click
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from llaminal.agent import run_agent_loop
+from llaminal.banners import print_banner
 from llaminal.client import LlaminalClient
 from llaminal.config import DEFAULTS, load_config, resolve
 from llaminal.discover import discover_servers
 from llaminal.moods import MOOD_NAMES, MOODS
 from llaminal.session import Session
 from llaminal.storage import Storage
+from llaminal.themes import THEME_NAMES, THEMES, set_theme
 from llaminal.tools.bash import bash_tool
 from llaminal.tools.files import list_files_tool, read_file_tool, write_file_tool
 from llaminal.tools.registry import ToolRegistry
@@ -45,6 +45,7 @@ async def _main_loop(
     resume_id: str | None,
     show_stats: bool = False,
     sound: bool = False,
+    quiet: bool = False,
 ) -> None:
     client = LlaminalClient(
         base_url=base_url, model=model, api_key=api_key, temperature=temperature
@@ -73,20 +74,8 @@ async def _main_loop(
         save_index = len(session.messages)
 
     # Welcome banner
-    brown = "rgb(160,100,50)"
-    banner = Text()
-    banner.append("  @@@@@", style=brown)
-    banner.append("     Llaminal", style="bold magenta")
-    banner.append(" v0.1.0\n", style="dim")
-    banner.append(" @(", style=brown)
-    banner.append("o o", style="bold black")
-    banner.append(")@", style=brown)
-    banner.append(f"    {base_url}\n", style="dim")
-    banner.append("  (   )~", style=brown)
-    banner.append("\n")
-    banner.append("   ||||", style=brown)
-    banner.append("      Type a message to chat. Ctrl+C to cancel, Ctrl+D to exit.\n", style="dim italic")
-    console.print(Panel(banner, border_style="magenta", padding=(0, 1)))
+    if not quiet:
+        print_banner(console, base_url)
 
     prompt_session: PromptSession = PromptSession(history=InMemoryHistory())
 
@@ -165,6 +154,8 @@ def _show_history() -> None:
 @click.option("--stats", "show_stats", is_flag=True, help="Show token/sec and latency stats after each response.")
 @click.option("--mood", default=None, type=click.Choice(MOOD_NAMES, case_sensitive=False), help="Use a persona preset (e.g. pirate, poet, senior-engineer).")
 @click.option("--sound", is_flag=True, help="Play a terminal bell when a long response finishes.")
+@click.option("--quiet", "-q", is_flag=True, help="Suppress the startup banner.")
+@click.option("--theme", default=None, type=click.Choice(THEME_NAMES, case_sensitive=False), help="Color theme (default, light, solarized, dracula, catppuccin, llama).")
 def main(
     port: int | None,
     base_url: str | None,
@@ -178,6 +169,8 @@ def main(
     show_stats: bool,
     mood: str | None,
     sound: bool,
+    quiet: bool,
+    theme: str | None,
 ) -> None:
     """Llaminal — an agentic CLI for local LLMs."""
     if show_history:
@@ -185,6 +178,13 @@ def main(
         return
 
     cfg = load_config(config_path)
+
+    # Set color theme early so all rendering uses it
+    theme_name = resolve(theme, cfg.get("theme"), "default")
+    if theme_name not in THEMES:
+        console.print(f"[bold red]Error:[/bold red] Unknown theme '{theme_name}'. Options: {', '.join(THEME_NAMES)}")
+        raise SystemExit(1)
+    set_theme(theme_name)
 
     # Resolve each setting: CLI flag > env var (handled by Click for api_key) > config > default
     model = resolve(model, cfg.get("model"), DEFAULTS["model"])
@@ -235,7 +235,8 @@ def main(
 
     show_stats = show_stats or cfg.get("stats", False)
     sound = sound or cfg.get("sound", False)
-    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt, resume_id, show_stats, sound))
+    quiet = quiet or cfg.get("quiet", False)
+    asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt, resume_id, show_stats, sound, quiet))
 
 
 def _auto_detect() -> str | None:

@@ -9,6 +9,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from llaminal.themes import get_theme
+
 console = Console()
 
 LLAMA = "\U0001f999"  # 🦙
@@ -105,21 +107,24 @@ def render_assistant(text: str) -> None:
 
 def render_tool_call(name: str, args: dict) -> None:
     """Render a styled tool invocation block."""
+    theme = get_theme()
     args_text = "\n".join(f"  {k}: {v}" for k, v in args.items())
     content = Text.assemble(
-        ("Tool: ", "bold cyan"),
-        (name, "bold white"),
+        ("Tool: ", theme.tool_label),
+        (name, theme.tool_name),
         ("\n",),
         (args_text, "dim"),
     )
-    console.print(Panel(content, border_style="cyan", title="Tool Call", title_align="left"))
+    console.print(Panel(content, border_style=theme.tool_border, title="Tool Call", title_align="left"))
 
 
 def render_tool_result(result: str) -> None:
     """Render tool output in a panel."""
-    console.print(Panel(result, border_style="green", title="Result", title_align="left"))
+    theme = get_theme()
+    console.print(Panel(result, border_style=theme.result_border, title="Result", title_align="left"))
 
 
 def render_error(msg: str) -> None:
     """Render an error message in red."""
-    console.print(f"[bold red]Error:[/bold red] {msg}")
+    theme = get_theme()
+    console.print(f"[{theme.error}]Error:[/{theme.error}] {msg}")
