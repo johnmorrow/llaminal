@@ -1,6 +1,7 @@
 """Entry point — input loop, Rich rendering, click CLI."""
 
 import asyncio
+from pathlib import Path
 
 import click
 from prompt_toolkit import PromptSession
@@ -11,6 +12,7 @@ from rich.text import Text
 
 from llaminal.agent import run_agent_loop
 from llaminal.client import LlaminalClient
+from llaminal.config import DEFAULTS, load_config, resolve
 from llaminal.session import Session
 from llaminal.tools.bash import bash_tool
 from llaminal.tools.files import list_files_tool, read_file_tool, write_file_tool
@@ -89,24 +91,40 @@ async def _main_loop(
 
 
 @click.command()
-@click.option("--port", default=8080, help="Port of the local server (shorthand for --base-url http://localhost:<port>).")
+@click.option("--port", default=None, type=int, help="Port of the local server (shorthand for --base-url http://localhost:<port>).")
 @click.option("--base-url", default=None, help="Full base URL of the OpenAI-compatible server.")
-@click.option("--model", default="local-model", help="Model name to send in requests.")
+@click.option("--model", default=None, help="Model name to send in requests.")
 @click.option("--api-key", default=None, envvar="LLAMINAL_API_KEY", help="API key for authentication (or set LLAMINAL_API_KEY).")
 @click.option("--temperature", default=None, type=float, help="Sampling temperature for the model.")
 @click.option("--system-prompt", default=None, help="Override the default system prompt.")
+@click.option("--config", "config_path", default=None, type=click.Path(exists=True, path_type=Path), help="Path to config file (default: ~/.config/llaminal/config.toml).")
 def main(
-    port: int,
+    port: int | None,
     base_url: str | None,
-    model: str,
+    model: str | None,
     api_key: str | None,
     temperature: float | None,
     system_prompt: str | None,
+    config_path: Path | None,
 ) -> None:
     """Llaminal — an agentic CLI for local LLMs."""
-    # --base-url wins over --port
+    cfg = load_config(config_path)
+
+    # Resolve each setting: CLI flag > env var (handled by Click for api_key) > config > default
+    model = resolve(model, cfg.get("model"), DEFAULTS["model"])
+    api_key = resolve(api_key, cfg.get("api_key"), DEFAULTS["api_key"])
+    temperature = resolve(temperature, cfg.get("temperature"), DEFAULTS["temperature"])
+    system_prompt = resolve(system_prompt, cfg.get("system_prompt"), DEFAULTS["system_prompt"])
+
+    # Base URL resolution: --base-url > --port > config base_url > config port > default
     if base_url is None:
-        base_url = f"http://localhost:{port}"
+        if port is not None:
+            base_url = f"http://localhost:{port}"
+        else:
+            base_url = resolve(None, cfg.get("base_url"), None)
+            if base_url is None:
+                cfg_port = cfg.get("port", DEFAULTS["port"])
+                base_url = f"http://localhost:{cfg_port}"
 
     asyncio.run(_main_loop(base_url, model, api_key, temperature, system_prompt))
 
